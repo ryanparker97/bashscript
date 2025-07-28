@@ -1,0 +1,930 @@
+#!/usr/bin/env bash
+
+# Colors for better UI
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Function to convert string to lowercase (bash 3.2 compatible)
+to_lowercase() {
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# Function to convert string to uppercase (bash 3.2 compatible)
+to_uppercase() {
+    echo "$1" | tr '[:lower:]' '[:upper:]'
+}
+
+# Function to display usage
+show_usage() {
+    cat << EOF
+Usage: $0 [company_name] [environment_name]
+
+AWS SSO Profile Manager (macOS Compatible)
+
+Commands:
+  $0                     # Interactive mode - choose company first, then environment
+  $0 sbc                 # Direct mode - go to environment selection for 'sbc'
+  $0 sbc sit             # Jump directly to profile details for 'sbc_sit'
+  $0 mycompany dev       # Jump directly to profile details for 'mycompany_dev'
+
+Options:
+  -h, --help             Show this help message
+  -c, --companies        Show available companies only
+  -a, --accounts         Show all account IDs and mappings
+
+Examples:
+  $0                     # Choose company first, then environment
+  $0 sbc                 # Skip to environment selection for 'sbc' company
+  $0 sbc sit             # Go directly to 'sbc_sit' profile details
+  $0 techcorp prod       # Go directly to 'techcorp_prod' profile details
+  $0 -c                  # List all available companies
+  $0 -a                  # Show account mappings
+
+Default config location: ${HOME}/.aws/config
+
+Note: Company and environment names are case-insensitive. If the profile doesn't exist,
+      you'll see an error and available options will be displayed.
+
+EOF
+}
+
+# Function to check if a company exists in config file (case-insensitive)
+company_exists() {
+    local company="$1"
+    local config_file="${2:-${HOME}/.aws/config}"
+    
+    if [[ ! -f "$config_file" ]]; then
+        return 1
+    fi
+    
+    # Convert input company to lowercase for comparison
+    local company_lower
+    company_lower=$(to_lowercase "$company")
+    
+    # Check if any profile starts with company_ (case-insensitive)
+    while IFS= read -r line; do
+        if [[ $line =~ ^\[profile[[:space:]]+([^]]+)\] ]]; then
+            profile_name="${BASH_REMATCH[1]}"
+            
+            # Skip default profile
+            if [[ "$profile_name" == "default" ]]; then
+                continue
+            fi
+            
+            # Extract company part and convert to lowercase
+            if [[ $profile_name =~ ^([^_-]+)[_-] ]]; then
+                profile_company="${BASH_REMATCH[1]}"
+                profile_company_lower=$(to_lowercase "$profile_company")
+                
+                # Case-insensitive comparison
+                if [[ "$profile_company_lower" == "$company_lower" ]]; then
+                    # Return the actual company name from config (preserve case)
+                    echo "$profile_company"
+                    return 0
+                fi
+            fi
+        fi
+    done < "$config_file"
+    
+    return 1
+}
+
+# Function to check if a specific profile exists (case-insensitive)
+profile_exists() {
+    local company="$1"
+    local environment="$2"
+    local config_file="${3:-${HOME}/.aws/config}"
+    
+    if [[ ! -f "$config_file" ]]; then
+        return 1
+    fi
+    
+    # Convert inputs to lowercase for comparison
+    local company_lower environment_lower
+    company_lower=$(to_lowercase "$company")
+    environment_lower=$(to_lowercase "$environment")
+    
+    # Check if profile exists (case-insensitive)
+    while IFS= read -r line; do
+        if [[ $line =~ ^\[profile[[:space:]]+([^]]+)\] ]]; then
+            profile_name="${BASH_REMATCH[1]}"
+            
+            # Check if profile matches company_environment pattern (case-insensitive)
+            if [[ $profile_name =~ ^([^_-]+)[_-](.+)$ ]]; then
+                profile_company="${BASH_REMATCH[1]}"
+                profile_env="${BASH_REMATCH[2]}"
+                
+                profile_company_lower=$(to_lowercase "$profile_company")
+                profile_env_lower=$(to_lowercase "$profile_env")
+                
+                # Case-insensitive comparison
+                if [[ "$profile_company_lower" == "$company_lower" ]] && [[ "$profile_env_lower" == "$environment_lower" ]]; then
+                    # Return the actual profile name from config (preserve case)
+                    echo "$profile_name"
+                    return 0
+                fi
+            fi
+        fi
+    done < "$config_file"
+    
+    return 1
+}
+
+# Function to get available companies dynamically
+get_companies() {
+    local config_file="${1:-${HOME}/.aws/config}"
+    
+    if [[ ! -f "$config_file" ]]; then
+        echo "Config file not found: $config_file" >&2
+        return 1
+    fi
+    
+    # Use a temporary approach to track companies and counts
+    local companies_temp
+    companies_temp=$(mktemp -t aws_companies.XXXXXX)
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^\[profile[[:space:]]+([^]]+)\] ]]; then
+            profile_name="${BASH_REMATCH[1]}"
+            
+            # Skip default profile
+            if [[ "$profile_name" == "default" ]]; then
+                continue
+            fi
+            
+            # Extract company name (everything before first underscore or dash)
+            if [[ $profile_name =~ ^([^_-]+)[_-] ]]; then
+                company="${BASH_REMATCH[1]}"
+                echo "$company" >> "$companies_temp"
+            fi
+        fi
+    done < "$config_file"
+    
+    # Count and output companies (macOS compatible)
+    if [[ -f "$companies_temp" && -s "$companies_temp" ]]; then
+        sort "$companies_temp" | uniq -c | while read -r count company; do
+            # Remove leading spaces from count (macOS uniq behavior)
+            count=$(echo "$count" | tr -d ' ')
+            echo "$company:$count"
+        done
+        rm -f "$companies_temp"
+    else
+        rm -f "$companies_temp"
+    fi
+}
+
+# Function to get available environments for a company dynamically
+get_environments() {
+    local company="$1"
+    local config_file="${2:-${HOME}/.aws/config}"
+    
+    local environments_temp
+    environments_temp=$(mktemp -t aws_environments.XXXXXX)
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^\[profile[[:space:]]+([^]]+)\] ]]; then
+            profile_name="${BASH_REMATCH[1]}"
+            
+            # Check if profile matches company pattern and extract environment
+            if [[ $profile_name =~ ^${company}[_-](.+)$ ]]; then
+                env="${BASH_REMATCH[1]}"
+                echo "$env" >> "$environments_temp"
+            fi
+        fi
+    done < "$config_file"
+    
+    # Output environments sorted
+    if [[ -f "$environments_temp" && -s "$environments_temp" ]]; then
+        sort -u "$environments_temp"
+        rm -f "$environments_temp"
+    else
+        rm -f "$environments_temp"
+    fi
+}
+
+# Function to get environment icon dynamically
+get_env_icon() {
+    local env="$1"
+    local env_lower
+    env_lower=$(to_lowercase "$env")
+    
+    case "$env_lower" in
+        dev|development) echo "🔧" ;;
+        sit|staging|test|testing) echo "🧪" ;;
+        prod|production|prd) echo "🚀" ;;
+        uat|user*) echo "👥" ;;
+        qa|quality*) echo "🔍" ;;
+        demo|sandbox) echo "🏖️" ;;
+        int|integration) echo "🔗" ;;
+        perf|performance) echo "⚡" ;;
+        dr|disaster*) echo "🆘" ;;
+        *) echo "📦" ;;
+    esac
+}
+
+# Function to get account ID for a profile
+get_account_id() {
+    local profile="$1"
+    local config_file="${2:-${HOME}/.aws/config}"
+    
+    local in_profile=false
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^\[profile[[:space:]]+$profile\] ]]; then
+            in_profile=true
+        elif [[ $line =~ ^\[ ]]; then
+            in_profile=false
+        elif [[ $in_profile == true ]] && [[ $line =~ ^sso_account_id[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            echo "${BASH_REMATCH[1]// /}"
+            return 0
+        fi
+    done < "$config_file"
+}
+
+# Function to show account mappings
+show_account_mappings() {
+    local config_file="${1:-${HOME}/.aws/config}"
+    
+    echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║        AWS Account Mappings        ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BLUE}📁 Config: ${config_file}${NC}"
+    echo ""
+    
+    # Get companies list
+    company_list=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && company_list+=("$line")
+    done < <(get_companies "$config_file")
+    
+    if [[ ${#company_list[@]} -eq 0 ]]; then
+        echo -e "${RED}❌ No companies found in config file${NC}"
+        return 1
+    fi
+    
+    for company_info in "${company_list[@]}"; do
+        IFS=':' read -r company count <<< "$company_info"
+        company_upper=$(to_uppercase "$company")
+        echo -e "${BLUE}🏢 ${company_upper}:${NC}"
+        
+        # Get environments for this company
+        env_list=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && env_list+=("$line")
+        done < <(get_environments "$company" "$config_file")
+        
+        for env in "${env_list[@]}"; do
+            profile="${company}_${env}"
+            account_id=$(get_account_id "$profile" "$config_file")
+            env_emoji=$(get_env_icon "$env")
+            env_upper=$(to_uppercase "$env")
+            
+            if [[ -n "$account_id" ]]; then
+                printf "  ${env_emoji} %-12s ${GREEN}%s${NC}\n" "${env_upper}" "$account_id"
+            else
+                printf "  ${env_emoji} %-12s ${RED}No Account ID${NC}\n" "${env_upper}"
+            fi
+        done
+        echo ""
+    done
+}
+
+# Function to show available companies only
+show_companies_only() {
+    local config_file="${1:-${HOME}/.aws/config}"
+    
+    echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║     Available AWS Companies       ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BLUE}📁 Config: ${config_file}${NC}"
+    echo ""
+    
+    company_list=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && company_list+=("$line")
+    done < <(get_companies "$config_file")
+    
+    if [[ ${#company_list[@]} -eq 0 ]]; then
+        echo -e "${RED}❌ No companies found in AWS config file: $config_file${NC}"
+        echo -e "${YELLOW}💡 Make sure your profiles follow the pattern: company_environment${NC}"
+        echo -e "${YELLOW}📍 Expected location: ${HOME}/.aws/config${NC}"
+        return 1
+    fi
+    
+    for company_info in "${company_list[@]}"; do
+        IFS=':' read -r company count <<< "$company_info"
+        company_upper=$(to_uppercase "$company")
+        echo -e "${GREEN}🏢 ${company_upper}${NC} - ${BLUE}$count profile$([ $count -ne 1 ] && echo 's' || echo '')${NC}"
+        
+        # Show environments for this company
+        env_list=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && env_list+=("$line")
+        done < <(get_environments "$company" "$config_file")
+        
+        echo -e "${YELLOW}   Environments:${NC}"
+        for env in "${env_list[@]}"; do
+            icon=$(get_env_icon "$env")
+            echo -e "${MAGENTA}     $icon $env${NC}"
+        done
+        echo ""
+    done
+}
+
+# Function to clear screen (macOS compatible)
+clear_screen() {
+    if command -v clear >/dev/null 2>&1; then
+        clear
+    else
+        printf '\033[2J\033[H'
+    fi
+}
+
+# Function to display company selection menu
+show_company_menu() {
+    local config_file="${1:-${HOME}/.aws/config}"
+    
+    clear_screen
+    echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║    AWS SSO Profile Manager    ║${NC}"
+    echo -e "${CYAN}║         macOS Compatible           ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BLUE}📁 Config: ${config_file}${NC}"
+    echo ""
+    echo -e "${YELLOW}🏢 Step 1: Select Company${NC}"
+    echo ""
+    
+    # Check if config file exists
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${RED}❌ Config file not found: $config_file${NC}"
+        echo -e "${YELLOW}💡 Please create the config file first or check the path${NC}"
+        echo -e "${BLUE}🔧 Expected format:${NC}"
+        echo -e "${GREEN}[profile company_environment]${NC}"
+        echo -e "${GREEN}sso_start_url = https://...${NC}"
+        echo -e "${GREEN}sso_region = ap-southeast-1${NC}"
+        echo -e "${GREEN}sso_account_id = 123456789012${NC}"
+        echo -e "${GREEN}sso_role_name = role-name${NC}"
+        echo -e "${GREEN}output = json${NC}"
+        return 1
+    fi
+    
+    # Get companies and store in array
+    company_list=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && company_list+=("$line")
+    done < <(get_companies "$config_file")
+    
+    if [[ ${#company_list[@]} -eq 0 ]]; then
+        echo -e "${RED}❌ No companies found in AWS config file${NC}"
+        echo -e "${YELLOW}💡 Make sure your profiles follow the pattern: company_environment${NC}"
+        echo -e "${YELLOW}📍 Looking in: $config_file${NC}"
+        return 1
+    fi
+    
+    # Display menu
+    local i=1
+    # Store menu mappings in a temporary file (macOS compatible)
+    local menu_temp
+    menu_temp=$(mktemp -t aws_menu.XXXXXX)
+    
+    echo -e "${BLUE}Available Companies:${NC}"
+    for company_info in "${company_list[@]}"; do
+        IFS=':' read -r company count <<< "$company_info"
+        
+        # Get sample environments for preview (limit to 3)
+        env_sample=()
+        local env_count=0
+        while IFS= read -r line && [[ $env_count -lt 3 ]]; do
+            if [[ -n "$line" ]]; then
+                env_sample+=("$line")
+                ((env_count++))
+            fi
+        done < <(get_environments "$company" "$config_file")
+        
+        env_preview=""
+        for env in "${env_sample[@]}"; do
+            icon=$(get_env_icon "$env")
+            env_preview+="$icon$env "
+        done
+        
+        # Check if there are more environments (macOS compatible wc)
+        total_envs=$(get_environments "$company" "$config_file" | wc -l | tr -d ' ')
+        if [[ $total_envs -gt 3 ]]; then
+            env_preview+="..."
+        fi
+        
+        company_upper=$(to_uppercase "$company")
+        printf "${GREEN}%2d)${NC} ${BLUE}%-12s${NC} ${MAGENTA}(%d profile%s)${NC} ${YELLOW}%s${NC}\n" \
+            "$i" "${company_upper}" "$count" "$([ $count -ne 1 ] && echo 's' || echo '')" "$env_preview"
+        
+        # Store mapping in temp file
+        echo "$i:$company" >> "$menu_temp"
+        ((i++))
+    done
+    
+    echo ""
+    echo -e "${CYAN}💡 Tip: Use ${BOLD}aws_profile COMPANY${NC}${CYAN} or ${BOLD}aws_profile COMPANY ENV${NC}${CYAN} for faster access${NC}"
+    echo ""
+    printf "${GREEN}%2s)${NC} ${CYAN}%-12s${NC}\n" "a" "Account Mappings"
+    printf "${GREEN}%2s)${NC} ${RED}%-12s${NC}\n" "q" "Quit"
+    echo ""
+    
+    # Get user selection
+    while true; do
+        echo -n -e "${YELLOW}👉 Enter your choice [1-$((i-1)), a, or q]: ${NC}"
+        read -r choice
+        
+        if [[ "$choice" == "q" || "$choice" == "Q" ]]; then
+            rm -f "$menu_temp"
+            echo "👋 Goodbye!"
+            return 0
+        elif [[ "$choice" == "a" || "$choice" == "A" ]]; then
+            show_account_mappings "$config_file"
+            echo ""
+            echo -n -e "${YELLOW}Press Enter to continue...${NC}"
+            read -r
+            rm -f "$menu_temp"
+            show_company_menu "$config_file"
+            return 0
+        elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 ]] && [[ $choice -lt $i ]]; then
+            # Get company from temp file
+            selected_company=$(grep "^$choice:" "$menu_temp" | cut -d: -f2)
+            rm -f "$menu_temp"
+            if [[ -n "$selected_company" ]]; then
+                show_environment_menu "$selected_company" "$config_file"
+                return 0
+            fi
+        else
+            echo -e "${RED}❌ Invalid choice. Please try again.${NC}"
+        fi
+    done
+}
+
+# Function to display environment selection menu
+show_environment_menu() {
+    local company="$1"
+    local config_file="${2:-${HOME}/.aws/config}"
+    
+    clear_screen
+    echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║    AWS SSO Profile Manager    ║${NC}"
+    echo -e "${CYAN}║         macOS Compatible           ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
+    echo ""
+    
+    company_upper=$(to_uppercase "$company")
+    echo -e "${BLUE}🏢 Selected Company: ${company_upper}${NC}"
+    echo ""
+    echo -e "${YELLOW}🌍 Step 2: Select Environment${NC}"
+    echo ""
+    
+    # Get environments and store in array
+    env_list=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && env_list+=("$line")
+    done < <(get_environments "$company" "$config_file")
+    
+    if [[ ${#env_list[@]} -eq 0 ]]; then
+        echo -e "${RED}❌ No environments found for company: $company${NC}"
+        echo -e "${YELLOW}💡 Expected profile format: ${company}_environment${NC}"
+        return 1
+    fi
+    
+    # Display menu
+    local i=1
+    local menu_temp
+    menu_temp=$(mktemp -t aws_env_menu.XXXXXX)
+    
+    echo -e "${BLUE}Available Environments for ${company_upper}:${NC}"
+    for env in "${env_list[@]}"; do
+        env_emoji=$(get_env_icon "$env")
+        profile_name="${company}_${env}"
+        account_id=$(get_account_id "$profile_name" "$config_file")
+        env_upper=$(to_uppercase "$env")
+        
+        printf "${GREEN}%2d)${NC} ${env_emoji} ${BLUE}%-12s${NC} ${MAGENTA}(%s)${NC} ${CYAN}%s${NC}\n" \
+            "$i" "${env_upper}" "$profile_name" "${account_id:-N/A}"
+        
+        # Store mapping in temp file
+        echo "$i:$env" >> "$menu_temp"
+        ((i++))
+    done
+    
+    echo ""
+    echo -e "${CYAN}💡 Tip: Use ${BOLD}aws_profile ${company} ENVIRONMENT${NC}${CYAN} to jump directly to profile details${NC}"
+    echo ""
+    printf "${GREEN}%2s)${NC} ${YELLOW}%-12s${NC}\n" "b" "← Back to Companies"
+    printf "${GREEN}%2s)${NC} ${RED}%-12s${NC}\n" "q" "Quit"
+    echo ""
+    
+    # Get user selection
+    while true; do
+        echo -n -e "${YELLOW}👉 Enter your choice [1-$((i-1)), b, or q]: ${NC}"
+        read -r choice
+        
+        if [[ "$choice" == "q" || "$choice" == "Q" ]]; then
+            rm -f "$menu_temp"
+            echo "👋 Goodbye!"
+            return 0
+        elif [[ "$choice" == "b" || "$choice" == "B" ]]; then
+            rm -f "$menu_temp"
+            show_company_menu "$config_file"
+            return 0
+        elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 ]] && [[ $choice -lt $i ]]; then
+            # Get environment from temp file
+            selected_env=$(grep "^$choice:" "$menu_temp" | cut -d: -f2)
+            rm -f "$menu_temp"
+            if [[ -n "$selected_env" ]]; then
+                selected_profile="${company}_${selected_env}"
+                show_profile_details "$company" "$selected_env" "$selected_profile" "$config_file"
+                return 0
+            fi
+        else
+            echo -e "${RED}❌ Invalid choice. Please try again.${NC}"
+        fi
+    done
+}
+
+# Function to display final profile details and commands
+show_profile_details() {
+    local company="$1"
+    local environment="$2"
+    local profile="$3"
+    local config_file="${4:-${HOME}/.aws/config}"
+    
+    clear_screen
+    echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║    AWS SSO Profile Manager    ║${NC}"
+    echo -e "${CYAN}║         macOS Compatible           ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
+    echo ""
+    
+    env_emoji=$(get_env_icon "$environment")
+    company_upper=$(to_uppercase "$company")
+    environment_upper=$(to_uppercase "$environment")
+    
+    echo -e "${BLUE}🏢 Company: ${BOLD}${company_upper}${NC}"
+    echo -e "${GREEN}${env_emoji} Environment: ${BOLD}${environment_upper}${NC}"
+    echo -e "${MAGENTA}📋 Profile: ${BOLD}${profile}${NC}"
+    echo ""
+    
+    # Check if profile exists and get configuration
+    local profile_config=""
+    local in_profile=false
+    local config_found=false
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^\[profile[[:space:]]+$profile\] ]]; then
+            in_profile=true
+            config_found=true
+            profile_config+="$line"$'\n'
+        elif [[ $line =~ ^\[ ]]; then
+            in_profile=false
+        elif [[ $in_profile == true ]] && [[ $line =~ ^[a-zA-Z] ]]; then
+            profile_config+="$line"$'\n'
+        fi
+    done < "$config_file"
+    
+    if [[ $config_found == false ]]; then
+        echo -e "${RED}❌ Profile '$profile' not found in config file!${NC}"
+        return 1
+    fi
+    
+    # Parse and display configuration in a structured way
+    show_structured_config "$profile" "$profile_config"
+    
+    # Show usage commands
+    aws sso login --profile $profile --use-device-code
+    
+}
+
+# Function to show structured configuration
+show_structured_config() {
+    local profile="$1"
+    local config="$2"
+    
+    echo -e "${YELLOW}⚙️  SSO Configuration:${NC}"
+    echo "$(printf '═%.0s' $(seq 1 19))"
+    echo ""
+    
+    # Parse configuration values
+    local sso_start_url=""
+    local sso_region=""
+    local sso_account_id=""
+    local sso_role_name=""
+    local output=""
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^sso_start_url[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            sso_start_url="${BASH_REMATCH[1]// /}"
+        elif [[ $line =~ ^sso_region[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            sso_region="${BASH_REMATCH[1]// /}"
+        elif [[ $line =~ ^sso_account_id[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            sso_account_id="${BASH_REMATCH[1]// /}"
+        elif [[ $line =~ ^sso_role_name[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            sso_role_name="${BASH_REMATCH[1]// /}"
+        elif [[ $line =~ ^output[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            output="${BASH_REMATCH[1]// /}"
+        fi
+    done <<< "$config"
+    
+    # Display in a structured format
+    echo -e "${BLUE}🔗 SSO Start URL:${NC}    ${GREEN}$sso_start_url${NC}"
+    echo -e "${BLUE}🌍 SSO Region:${NC}       ${GREEN}$sso_region${NC}"
+    echo -e "${BLUE}🏦 Account ID:${NC}       ${GREEN}$sso_account_id${NC}"
+    echo -e "${BLUE}👤 Role Name:${NC}        ${GREEN}$sso_role_name${NC}"
+    echo -e "${BLUE}📄 Output Format:${NC}    ${GREEN}$output${NC}"
+    echo ""
+}
+
+# Function to copy to clipboard (macOS optimized)
+copy_to_clipboard() {
+    local text="$1"
+    
+    if command -v pbcopy >/dev/null 2>&1; then
+        echo "$text" | pbcopy
+        echo -e "${GREEN}✅ Copied to clipboard (macOS): $text${NC}"
+    elif command -v xclip >/dev/null 2>&1; then
+        echo "$text" | xclip -selection clipboard
+        echo -e "${GREEN}✅ Copied to clipboard (Linux): $text${NC}"
+    elif command -v clip >/dev/null 2>&1; then
+        echo "$text" | clip
+        echo -e "${GREEN}✅ Copied to clipboard (Windows): $text${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Clipboard utility not found.${NC}"
+        echo -e "${BLUE}Command: ${text}${NC}"
+        echo -e "${YELLOW}💡 On macOS, pbcopy should be available by default${NC}"
+    fi
+}
+
+# Function to show all profiles for a company
+show_all_company_profiles() {
+    local company="$1"
+    local config_file="${2:-${HOME}/.aws/config}"
+    
+    echo ""
+    company_upper=$(to_uppercase "$company")
+    echo -e "${YELLOW}📋 All ${company_upper} Profiles:${NC}"
+    echo "$(printf '═%.0s' $(seq 1 20))"
+    
+    env_list=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && env_list+=("$line")
+    done < <(get_environments "$company" "$config_file")
+    
+    for env in "${env_list[@]}"; do
+        env_emoji=$(get_env_icon "$env")
+        echo -e "${GREEN}  $env_emoji ${company}_${env}${NC}"
+    done
+    echo ""
+}
+
+# Function to show SSO usage commands (macOS specific)
+show_sso_usage_commands() {
+    local profile="$1"
+    local environment="$2"
+    local env_lower
+    env_lower=$(to_lowercase "$environment")
+    
+    echo -e "${YELLOW}🚀 SSO Usage Commands (macOS):${NC}"
+    echo "$(printf '═%.0s' $(seq 1 25))"
+    echo ""
+    
+    echo -e "${BLUE}🔐 SSO Login (Required First):${NC}"
+    echo -e "${GREEN}  aws --profile $profile sso login${NC}"
+    echo ""
+    
+    echo -e "${BLUE}📝 Basic AWS CLI Commands:${NC}"
+    echo -e "${GREEN}  aws --profile $profile sts get-caller-identity${NC}"
+    echo -e "${GREEN}  aws --profile $profile s3 ls${NC}"
+    echo -e "${GREEN}  aws --profile $profile ec2 describe-instances${NC}"
+    echo -e "${GREEN}  aws --profile $profile iam list-roles${NC}"
+    echo ""
+    
+    echo -e "${BLUE}🔧 Environment Variable (Terminal Session):${NC}"
+    echo -e "${GREEN}  export AWS_PROFILE=$profile${NC}"
+    echo -e "${GREEN}  # Then use: aws sts get-caller-identity${NC}"
+    echo ""
+    
+    echo -e "${BLUE}🍎 macOS Terminal Integration:${NC}"
+    echo -e "${GREEN}  # Add to ~/.zshrc or ~/.bash_profile:${NC}"
+    echo -e "${GREEN}  alias aws-$profile='export AWS_PROFILE=$profile'${NC}"
+    echo -e "${GREEN}  # Then use: aws-$profile${NC}"
+    echo ""
+    
+    echo -e "${BLUE}⚙️  Set as Default Profile:${NC}"
+    echo -e "${GREEN}  aws configure set default.profile $profile${NC}"
+    echo ""
+    
+    echo -e "${BLUE}🔄 SSO Session Management:${NC}"
+    echo -e "${GREEN}  aws --profile $profile sso logout${NC}"
+    echo -e "${GREEN}  aws --profile $profile configure sso${NC}"
+    echo ""
+    
+    # Environment-specific warnings and tips
+    case "$env_lower" in
+        prod|production)
+            echo -e "${RED}⚠️  PRODUCTION ENVIRONMENT - Use with extreme caution!${NC}"
+            echo -e "${RED}   • Double-check all commands before execution${NC}"
+            echo -e "${RED}   • Consider using --dry-run flags where available${NC}"
+            echo -e "${RED}   • Review your company's production access policies${NC}"
+            echo ""
+            ;;
+        dev|development)
+            echo -e "${BLUE}💡 Development Environment Tips:${NC}"
+            echo -e "${GREEN}  aws --profile $profile logs describe-log-groups${NC}"
+            echo -e "${GREEN}  aws --profile $profile cloudformation list-stacks${NC}"
+            echo ""
+            ;;
+        sit|staging|test)
+            echo -e "${BLUE}🧪 Testing Environment Tips:${NC}"
+            echo -e "${GREEN}  aws --profile $profile lambda list-functions${NC}"
+            echo -e "${GREEN}  aws --profile $profile apigateway get-rest-apis${NC}"
+            echo ""
+            ;;
+    esac
+}
+
+# Function to show company not found error with suggestions
+show_company_not_found() {
+    local requested_company="$1"
+    local config_file="${2:-${HOME}/.aws/config}"
+    
+    echo -e "${RED}❌ Company '${requested_company}' not found in config file${NC}"
+    echo ""
+    echo -e "${YELLOW}💡 Available companies:${NC}"
+    
+    # Get companies list
+    company_list=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && company_list+=("$line")
+    done < <(get_companies "$config_file")
+    
+    if [[ ${#company_list[@]} -eq 0 ]]; then
+        echo -e "${RED}   No companies found in config file${NC}"
+        echo -e "${YELLOW}   Make sure your profiles follow the pattern: company_environment${NC}"
+    else
+        for company_info in "${company_list[@]}"; do
+            IFS=':' read -r company count <<< "$company_info"
+            company_upper=$(to_uppercase "$company")
+            echo -e "${GREEN}   • ${company_upper}${NC} (${count} profile$([ $count -ne 1 ] && echo 's' || echo ''))"
+        done
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Usage examples:${NC}"
+    for company_info in "${company_list[@]}"; do
+        IFS=':' read -r company count <<< "$company_info"
+        echo -e "${BLUE}  aws_profile ${company}${NC}"
+        echo -e "${BLUE}  aws_profile ${company} dev${NC}"
+    done
+    echo ""
+}
+
+# Function to show environment not found error with suggestions
+show_environment_not_found() {
+    local company="$1"
+    local requested_env="$2"
+    local config_file="${3:-${HOME}/.aws/config}"
+    
+    company_upper=$(to_uppercase "$company")
+    echo -e "${RED}❌ Environment '${requested_env}' not found for company '${company_upper}'${NC}"
+    echo ""
+    echo -e "${YELLOW}💡 Available environments for ${company_upper}:${NC}"
+    
+    # Get environments for this company
+    env_list=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && env_list+=("$line")
+    done < <(get_environments "$company" "$config_file")
+    
+    if [[ ${#env_list[@]} -eq 0 ]]; then
+        echo -e "${RED}   No environments found for company: ${company}${NC}"
+        echo -e "${YELLOW}   Make sure your profiles follow the pattern: ${company}_environment${NC}"
+    else
+        for env in "${env_list[@]}"; do
+            env_emoji=$(get_env_icon "$env")
+            env_upper=$(to_uppercase "$env")
+            echo -e "${GREEN}   • ${env_emoji} ${env_upper}${NC}"
+        done
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Usage examples:${NC}"
+    for env in "${env_list[@]}"; do
+        echo -e "${BLUE}  aws_profile ${company} ${env}${NC}"
+    done
+    echo ""
+}
+
+# Main function - handles 0, 1, or 2 arguments
+main() {
+    local company_param="$1"
+    local environment_param="$2"
+    local config_file="${HOME}/.aws/config"
+    
+    # Check if config file exists
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${RED}❌ Config file not found: $config_file${NC}"
+        echo "Please check the path or create an AWS config file first."
+        echo ""
+        echo -e "${YELLOW}💡 Expected SSO format:${NC}"
+        echo -e "${GREEN}[profile company_environment]${NC}"
+        echo -e "${GREEN}sso_start_url = https://...${NC}"
+        echo -e "${GREEN}sso_region = ap-southeast-1${NC}"
+        echo -e "${GREEN}sso_account_id = 123456789012${NC}"
+        echo -e "${GREEN}sso_role_name = role-name${NC}"
+        echo -e "${GREEN}output = json${NC}"
+        echo ""
+        echo -e "${BLUE}🍎 macOS AWS CLI Setup:${NC}"
+        echo -e "${GREEN}  # Install AWS CLI (if not installed):${NC}"
+        echo -e "${GREEN}  brew install awscli${NC}"
+        echo -e "${GREEN}  # Or download from: https://aws.amazon.com/cli/${NC}"
+        return 1
+    fi
+    
+    # Case 1: No arguments -> Show company selection menu
+    if [[ -z "$company_param" ]]; then
+        show_company_menu "$config_file"
+        return 0
+    fi
+    
+    # Case 2: Only company specified -> Show environment selection
+    if [[ -n "$company_param" && -z "$environment_param" ]]; then
+        local actual_company
+        actual_company=$(company_exists "$company_param" "$config_file")
+        local exists_result=$?
+        
+        if [[ $exists_result -eq 0 && -n "$actual_company" ]]; then
+            # Company exists - go directly to environment selection
+            show_environment_menu "$actual_company" "$config_file"
+        else
+            # Company doesn't exist - show error and available companies
+            show_company_not_found "$company_param" "$config_file"
+            return 1
+        fi
+        return 0
+    fi
+    
+    # Case 3: Both company and environment specified -> Go directly to profile details
+    if [[ -n "$company_param" && -n "$environment_param" ]]; then
+        local actual_profile
+        actual_profile=$(profile_exists "$company_param" "$environment_param" "$config_file")
+        local profile_exists_result=$?
+        
+        if [[ $profile_exists_result -eq 0 && -n "$actual_profile" ]]; then
+            # Profile exists - extract the actual company and environment names from the profile
+            if [[ $actual_profile =~ ^([^_-]+)[_-](.+)$ ]]; then
+                actual_company="${BASH_REMATCH[1]}"
+                actual_environment="${BASH_REMATCH[2]}"
+                show_profile_details "$actual_company" "$actual_environment" "$actual_profile" "$config_file"
+            else
+                echo -e "${RED}❌ Invalid profile format: $actual_profile${NC}"
+                return 1
+            fi
+        else
+            # Profile doesn't exist - check if company exists first
+            local actual_company
+            actual_company=$(company_exists "$company_param" "$config_file")
+            local company_exists_result=$?
+            
+            if [[ $company_exists_result -eq 0 && -n "$actual_company" ]]; then
+                # Company exists but environment doesn't
+                show_environment_not_found "$actual_company" "$environment_param" "$config_file"
+            else
+                # Company doesn't exist
+                show_company_not_found "$company_param" "$config_file"
+            fi
+            return 1
+        fi
+        return 0
+    fi
+}
+
+# Handle command line arguments
+case "${1:-}" in
+    -h|--help)
+        show_usage
+        exit 0
+        ;;
+    -c|--companies)
+        show_companies_only "${HOME}/.aws/config"
+        exit 0
+        ;;
+    -a|--accounts)
+        show_account_mappings "${HOME}/.aws/config"
+        exit 0
+        ;;
+    *)
+        main "$1" "$2"
+        ;;
+esac
