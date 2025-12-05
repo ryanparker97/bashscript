@@ -301,7 +301,7 @@ show_companies_only() {
     local config_file="${1:-${HOME}/.aws/config}"
     
     echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     Available AWS Companies       ║${NC}"
+    echo -e "${CYAN}║     Available AWS Companies        ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${BLUE}📁 Config: ${config_file}${NC}"
@@ -354,7 +354,7 @@ show_company_menu() {
     
     clear_screen
     echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║    AWS SSO Profile Manager    ║${NC}"
+    echo -e "${CYAN}║    AWS SSO Profile Manager         ║${NC}"
     echo -e "${CYAN}║         macOS Compatible           ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
     echo ""
@@ -476,7 +476,7 @@ show_environment_menu() {
     
     clear_screen
     echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║    AWS SSO Profile Manager    ║${NC}"
+    echo -e "${CYAN}║    AWS SSO Profile Manager         ║${NC}"
     echo -e "${CYAN}║         macOS Compatible           ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
     echo ""
@@ -563,7 +563,7 @@ show_profile_details() {
     
     clear_screen
     echo -e "${CYAN}╔════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║    AWS SSO Profile Manager    ║${NC}"
+    echo -e "${CYAN}║    AWS SSO Profile Manager         ║${NC}"
     echo -e "${CYAN}║         macOS Compatible           ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════╝${NC}"
     echo ""
